@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from typing import Optional
 
@@ -6,8 +8,11 @@ from alpaca.trading.client import TradingClient
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.requests import GetOrdersRequest, OrderRequest
-from alpaca.data.timeframe import TimeFrame
-from datetime import datetime, timedelta
+from datetime import datetime
+from pydantic import BaseModel
+
+sys.path.append(str(Path(__file__).parent.parent))
+from shared.utils import parse_timeframe
 
 # --- 1. Load .env for Local Dev (optional) ---
 
@@ -28,6 +33,7 @@ app = FastAPI(
     title="AlgoTrading-MVP API",
     description="Back-end API for your AlgoTrading MVP with Alpaca and (soon) Zoya integration."
 )
+
 
 # --- 2. Diagnostics ---
 @app.get("/ping")
@@ -74,87 +80,92 @@ def get_orders(
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- 6. Get Stock Bars ---
-@app.get("/stocks/bar?")
+@app.get("/stocks/bars")
 def get_stock_bars(
-    symbol: str,
-    timeframe: str = Query("1Day", description="Bar interval: 1Min, 5Min, 1Hour, 1Day"),
-    bars: Optional[int] = Query(5, description="Number of most recent bars to fetch"),
-    limit: Optional[int] = Query(1000, description="The maximum number of data points to return in the response page"),
-    start: Optional[str] = Query(None, description="Start date/time ISO8601 (e.g. 2023-01-01)"),
-    end: Optional[str] = Query(None, description="End date/time ISO8601 (inclusive)"),
-    adjustment: str = Query("raw", description='adjustment: "raw", "split", "dividend", or "all"'),    
+    symbols: str = Query("AAPL", description="Comma-separated stock symbols"),
+    timeframe: str = Query("15Min", description="Bar interval (e.g. 1Min, 15Min, 1Hour, 1Day)"),
+    limit: Optional[int] = Query(1000, description="Max bars per symbol"),
+    adjustment: str = Query("raw", description='Adjustment type'),
+    start: Optional[str] = Query(None, description="Start ISO8601 date/time"),
+    end: Optional[str] = Query(None, description="End ISO8601 date/time"),
+    sort: str = Query("asc", description='Sort order: "asc" or "desc"'),
+    feed: Optional[str] = Query("sip", description="Data feed (e.g. sip, iex, otc)")
 ):
     """
-    Fetch historical OHLCV bars for a stock symbol using Alpaca 'stock bars' API.
+    Fetch historical OHLCV bars using a dynamically parsed timeframe.
     """
-    # --- Validate timeframe:
-    valid_timeframes = {"1Min": TimeFrame.Min, "5Min": TimeFrame.FiveMin, "15Min": TimeFrame.FifteenMin,
-                        "1Hour": TimeFrame.Hour, "1Day": TimeFrame.Day}
-    tf = valid_timeframes.get(timeframe)
-    if tf is None:
-        raise HTTPException(status_code=400, detail=f"Invalid timeframe '{timeframe}'. Allowed: {list(valid_timeframes)}")
-
-    # --- Date parsing (ISO 8601):
+    # --- Use the new helper function to parse the timeframe string ---
     try:
-        end_dt = datetime.fromisoformat(end) if end else datetime.now()
-        if start:
-            start_dt = datetime.fromisoformat(start)
-        else:
-            # Default: go 'bars' worth of periods backwards (factor ×2 for market closure days)
-            days_back = bars * 2 if tf == TimeFrame.Day else bars // 20  # estimate extra span for weekends
-            start_dt = end_dt - timedelta(days=days_back)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid date format for start/end ({e})")
+        tf_object = parse_timeframe(timeframe)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # --- Build bar request ---
-    req = StockBarsRequest(
-        symbol_or_symbols=symbol.upper(),
-        timeframe=tf,
-        limit=limit,
-        adjustment=adjustment
+    start_dt = datetime.fromisoformat(start) if start else None
+    end_dt = datetime.fromisoformat(end) if end else None
+    
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+
+    try:
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol_list,
+            timeframe=tf_object,
+            start=start_dt,
+            end=end_dt,
+            limit=limit,
+            adjustment=adjustment,
+            sort=sort,
+            feed=feed
+        )
+        
+        bars = data_client.get_stock_bars(request)
+        df = bars.df
+
+    except Exception as e:
+        # The SDK might raise its own validation errors (e.g., "5Day" is invalid)
+        raise HTTPException(status_code=500, detail=f"Alpaca SDK error: {str(e)}")
+
+    # Convert DataFrame output to dict keyed by symbol (this part remains the same)
+    output = {}
+    if not df.empty:
+        for symbol in symbol_list:
+            if "symbol" in df.index.names:
+                symbol_df = df[df.index.get_level_values("symbol") == symbol]
+            else:
+                symbol_df = df
+            output[symbol] = symbol_df.reset_index().to_dict(orient="records")
+    else:
+        for symbol in symbol_list:
+            output[symbol] = []
+
+    return output
+
+# --- 7. Place Paper Trade Order ---
+class PlaceOrderRequest(BaseModel):
+    symbol: str = "AAPL"    # Stock symbol to trade
+    qty: int = 1            # Quantity to buy/sell
+    side: str = "buy"       # "buy" or "sell"
+    type: str = "market"    # "market", "limit", stop, stop_limit, trailing_stop
+    time_in_force: str = "day"  # Default time_in_force to "day" for simplicity, can be changed to "gtc" or others as needed
+    
+@app.post("/orders")
+def place_order(payload: PlaceOrderRequest): # Renamed to 'payload' for clarity
+    """Place a paper trade order (buy or sell)."""
+    # --- FIX: Create the OrderRequest using data FROM the payload ---
+    order_data = OrderRequest(
+        symbol=payload.symbol.upper(),
+        qty=payload.qty,
+        side=payload.side.lower(),
+        type=payload.type,
+        time_in_force=payload.time_in_force
     )
 
     try:
-        bars = data_client.get_stock_bars(req)
-        df = bars.df
-        if df.empty:
-            return {"symbol": symbol.upper(), "bars": []}
-
-        # Use only the last N bars if 'bars' param used
-        if bars is not None and 'bars' in locals() and df.shape[0] > bars:
-            df = df.tail(bars)
-        # Always reset index for serializable output
-        result = df.reset_index().to_dict(orient="records")
-        return {"symbol": symbol.upper(), "bars": result}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Alpaca error: {str(e)}")
-
-# --- 7. Place Paper Trade Order ---
-from pydantic import BaseModel
-
-class PlaceOrderRequest(BaseModel):
-    symbol: str
-    qty: int
-    side: str  # "buy" or "sell"
-    type: str = "market"
-    time_in_force: str = "gtc"  # good till canceled
-
-@app.post("/order")
-def place_order(order: PlaceOrderRequest):
-    """Place a paper trade order (buy or sell)."""
-    order = OrderRequest()
-    try:
-        order_response = trading_client.submit_order(
-            symbol=order.symbol.upper(),
-            qty=order.qty,
-            side=order.side.lower(),
-            type=order.type,
-            time_in_force=order.time_in_force
-        )
+        order_response = trading_client.submit_order(order_data=order_data)
+        
         return {"order": order_response.dict()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Alpaca API error: {str(e)}")
+
 
 # --- 8. Cancel Existing Order ---
 @app.post("/cancel_order/{order_id}")
