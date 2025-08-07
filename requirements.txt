@@ -4,4 +4,7 @@ streamlit
 requests
 pydantic
 alpaca-py
-pandas
+yfinance
+python-dateutil
+plotly
+finnhub-python
