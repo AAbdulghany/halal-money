@@ -4,14 +4,20 @@ import requests
 import pandas as pd
 
 # --- Configuration ---
-st.set_page_config(layout="wide", page_title="Halal Money MVP", page_icon="📈")
+st.set_page_config(
+    layout="wide", 
+    page_title="Halal Money - Islamic Trading Platform", 
+    page_icon="�",
+    initial_sidebar_state="expanded"
+)
+
 BACKEND_URL = "http://127.0.0.1:8000"
 
 # --- Helper Functions ---
 def get_account_info():
     """Fetches account data from the backend."""
     try:
-        response = requests.get(f"{BACKEND_URL}/account")
+        response = requests.get(f"{BACKEND_URL}/alpaca/account")
         response.raise_for_status()
         return response.json().get('account', {})
     except requests.exceptions.RequestException as e:
@@ -21,7 +27,7 @@ def get_account_info():
 def get_positions():
     """Fetches current positions."""
     try:
-        response = requests.get(f"{BACKEND_URL}/positions")
+        response = requests.get(f"{BACKEND_URL}/alpaca/positions")
         response.raise_for_status()
         return response.json().get('positions', [])
     except requests.exceptions.RequestException:
@@ -30,14 +36,31 @@ def get_positions():
 def get_orders(status='all'):
     """Fetches orders with a given status."""
     try:
-        response = requests.get(f"{BACKEND_URL}/orders", params={"status": status})
+        response = requests.get(f"{BACKEND_URL}/alpaca/orders", params={"status": status})
         response.raise_for_status()
         return response.json().get('orders', [])
     except requests.exceptions.RequestException:
         return []
 
 # --- Main App Layout ---
-st.title("📈 Halal Money MVP Dashboard")
+st.title("� Halal Money - Trading Platform")
+
+# Top navigation
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    if st.button("📊 Stock Analysis & Research", use_container_width=True, type="primary"):
+        st.switch_page("pages/stock_analysis.py")
+
+with col2:
+    if st.button("📈 Enhanced Trading Dashboard", use_container_width=True):
+        st.switch_page("pages/trading_dashboard.py")
+
+with col3:
+    if st.button("🏠 Home", use_container_width=True):
+        st.switch_page("home.py")
+
+st.markdown("---")
 
 # Sidebar for navigation
 page = st.sidebar.radio("Navigate", ["Dashboard", "Trading", "Market Data"])
@@ -89,7 +112,7 @@ elif page == "Trading":
                 "time_in_force": time_in_force
             }
             try:
-                response = requests.post(f"{BACKEND_URL}/orders", json=payload)
+                response = requests.post(f"{BACKEND_URL}/alpaca/orders", json=payload)
                 response.raise_for_status()
                 st.success(f"Order submitted successfully!")
                 st.json(response.json())
@@ -113,6 +136,13 @@ elif page == "Trading":
 elif page == "Market Data":
     st.header("Market Data & Charting")
     
+    st.info("📊 For advanced market analysis, charting, and AI insights, visit our enhanced Stock Analysis page!")
+    
+    if st.button("🚀 Go to Stock Analysis Page", type="primary"):
+        st.switch_page("pages/stock_analysis.py")
+    
+    st.markdown("---")
+    
     c1, c2, c3 = st.columns(3)
     symbols_input = c1.text_input("Symbols (comma-separated)", "AAPL,TSLA").upper()
     timeframe_input = c2.selectbox("Timeframe", ["15Min", "1Day", "1Hour", "5Min", "1Min"])
@@ -125,7 +155,7 @@ elif page == "Market Data":
             "limit": limit_input
         }
         try:
-            response = requests.get(f"{BACKEND_URL}/stocks/bars", params=params)
+            response = requests.get(f"{BACKEND_URL}/alpaca/stocks/bars", params=params)
             response.raise_for_status()
             data = response.json()
             
@@ -143,3 +173,6 @@ elif page == "Market Data":
         except requests.exceptions.RequestException as e:
             st.error(f"Failed to fetch market data: {e}")
 
+# Footer
+st.markdown("---")
+st.caption("💡 **New Features Available!** Try our AI-powered Stock Analysis and enhanced Trading Dashboard using the buttons above.")
